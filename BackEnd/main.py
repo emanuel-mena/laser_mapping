@@ -1,55 +1,58 @@
 # main.py
 from typing import List, Optional
 from enum import Enum
-import random
 
 from fastapi import FastAPI, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from laser_mapper import LaserMapper3D
-from pointcloud_analysis import PointCloudAnalyzer
+from laser_service import (
+    LaserDemoService,
+    LaserDemoConfig,
+    ObjectType,
+    SceneObjectBase,
+    SceneObject,
+)
 
 
 app = FastAPI(title="LaserMapper3D Demo API")
 
-# CORS para el frontend (ajusta origin en producción)
+# CORS para el frontend (ajusta origin para producción)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ej: ["http://localhost:5173"]
+    allow_origins=["*"],  # p.ej. ["http://localhost:5173"]
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # =========================
-# Core: mapper + analyzer
+# Instancia del servicio core
 # =========================
 
-# Mapa 2.5D por celdas XZ, memoria acotada
-mapper = LaserMapper3D(
-    units="meters",
-    cell_size=0.02,  # resolución XY; ajustable según tu máquina
+service = LaserDemoService(
+    LaserDemoConfig(
+        units="meters",
+        cell_size=0.02,
+        base_height_percentile=0.15,
+        base_distance_threshold=0.01,
+        cluster_radius=0.08,
+        min_samples=5,
+        with_default_scene=True,
+    )
 )
 
-analyzer = PointCloudAnalyzer(
-    base_height_percentile=0.15,
-    base_distance_threshold=0.01,
-    cluster_radius=0.08,
-    min_samples=5,
-)
-
 # =========================
-# Scene object models
+# Pydantic models (solo para API)
 # =========================
 
-class ObjectType(str, Enum):
+class ObjectTypeAPI(str, Enum):
     box = "box"
     sphere = "sphere"
 
 
-class SceneObjectBase(BaseModel):
-    type: ObjectType
+class SceneObjectBaseAPI(BaseModel):
+    type: ObjectTypeAPI
     position: List[float] = Field(..., min_items=3, max_items=3)
     size: Optional[List[float]] = Field(
         None, min_items=3, max_items=3, description="Box size [sx, sy, sz]"
@@ -62,64 +65,9 @@ class SceneObjectBase(BaseModel):
     )
 
 
-class SceneObject(SceneObjectBase):
+class SceneObjectAPI(SceneObjectBaseAPI):
     id: int
 
-
-scene_objects: List[SceneObject] = []
-next_object_id: int = 1
-
-
-def _create_scene_object(data: SceneObjectBase) -> SceneObject:
-    global next_object_id, scene_objects
-    obj = SceneObject(id=next_object_id, **data.dict())
-    next_object_id += 1
-    scene_objects.append(obj)
-    return obj
-
-
-def init_default_scene() -> None:
-    """Optional: default virtual objects on startup."""
-    global scene_objects, next_object_id
-    scene_objects = []
-    next_object_id = 1
-
-    # Box 1
-    _create_scene_object(
-        SceneObjectBase(
-            type=ObjectType.box,
-            position=[0.8, 0.3, 0.2],
-            size=[0.8, 0.6, 0.8],
-            color="#3b82f6",
-        )
-    )
-
-    # Box 2
-    _create_scene_object(
-        SceneObjectBase(
-            type=ObjectType.box,
-            position=[-0.7, 0.45, -0.9],
-            size=[0.5, 0.9, 0.5],
-            color="#f97316",
-        )
-    )
-
-    # Sphere
-    _create_scene_object(
-        SceneObjectBase(
-            type=ObjectType.sphere,
-            position=[0.0, 0.4, 1.0],
-            radius=0.4,
-            color="#22c55e",
-        )
-    )
-
-
-init_default_scene()
-
-# =========================
-# Pointcloud models
-# =========================
 
 class SampleIn(BaseModel):
     x: float
@@ -174,7 +122,7 @@ class SegmentationResultOut(BaseModel):
 @app.get("/")
 def read_root():
     return {
-        "message": "LaserMapper3D Demo API",
+        "message": "LaserMapper3D Demo API (FastAPI adapter)",
         "endpoints": [
             "/sample",
             "/samples",
@@ -193,65 +141,91 @@ def read_root():
 # Scene object endpoints
 # =========================
 
-@app.get("/scene/objects", response_model=List[SceneObject])
+@app.get("/scene/objects", response_model=List[SceneObjectAPI])
 def list_scene_objects():
-    """
-    Return all virtual scene objects (boxes, spheres, etc.).
-    """
-    return scene_objects
+    """Devuelve los objetos de escena actuales."""
+    objs = service.list_objects()
+    return [
+        SceneObjectAPI(
+            id=o.id,
+            type=ObjectTypeAPI(o.type.value),
+            position=o.position,
+            size=o.size,
+            radius=o.radius,
+            color=o.color,
+        )
+        for o in objs
+    ]
 
 
-@app.post("/scene/objects", response_model=SceneObject)
-def create_scene_object(obj: SceneObjectBase):
+@app.post("/scene/objects", response_model=SceneObjectAPI)
+def create_scene_object(obj: SceneObjectBaseAPI):
     """
-    Create a new scene object.
-
-    Nota:
-    - NO limpiamos el mapa aquí; el mapa se actualiza cuando el láser
-      vuelve a escanear la zona y sobreescribe las celdas relevantes.
+    Crea un nuevo objeto de escena.
     """
-    return _create_scene_object(obj)
+    core_obj = SceneObjectBase(
+        type=ObjectType(obj.type.value),
+        position=list(obj.position),
+        size=list(obj.size) if obj.size is not None else None,
+        radius=obj.radius,
+        color=obj.color,
+    )
+    created = service.create_object(core_obj)
+    return SceneObjectAPI(
+        id=created.id,
+        type=ObjectTypeAPI(created.type.value),
+        position=created.position,
+        size=created.size,
+        radius=created.radius,
+        color=created.color,
+    )
 
 
-@app.put("/scene/objects/{object_id}", response_model=SceneObject)
-def update_scene_object(object_id: int, obj: SceneObjectBase):
+@app.put("/scene/objects/{object_id}", response_model=SceneObjectAPI)
+def update_scene_object(object_id: int, obj: SceneObjectBaseAPI):
     """
-    Update an existing scene object (replace all fields except id).
-
-    Igual que create: el mapa se actualiza de forma natural con el
-    siguiente escaneo.
+    Actualiza un objeto de escena existente.
     """
-    for i, existing in enumerate(scene_objects):
-        if existing.id == object_id:
-            updated = SceneObject(id=object_id, **obj.dict())
-            scene_objects[i] = updated
-            return updated
-    raise HTTPException(status_code=404, detail="Scene object not found")
+    core_obj = SceneObjectBase(
+        type=ObjectType(obj.type.value),
+        position=list(obj.position),
+        size=list(obj.size) if obj.size is not None else None,
+        radius=obj.radius,
+        color=obj.color,
+    )
+    try:
+        updated = service.update_object(object_id, core_obj)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Scene object not found")
+
+    return SceneObjectAPI(
+        id=updated.id,
+        type=ObjectTypeAPI(updated.type.value),
+        position=updated.position,
+        size=updated.size,
+        radius=updated.radius,
+        color=updated.color,
+    )
 
 
 @app.delete("/scene/objects/{object_id}")
 def delete_scene_object(object_id: int):
     """
-    Delete a scene object.
-
-    El mapa se corregirá cuando el láser vuelva a pasar por esas celdas
-    y registre la nueva geometría (por ejemplo, la mesa).
+    Elimina un objeto de escena.
     """
-    global scene_objects
-    new_list = [o for o in scene_objects if o.id != object_id]
-    if len(new_list) == len(scene_objects):
+    try:
+        service.delete_object(object_id)
+    except KeyError:
         raise HTTPException(status_code=404, detail="Scene object not found")
-    scene_objects = new_list
     return {"status": "deleted", "id": object_id}
 
 
 @app.post("/scene/reset")
 def reset_scene():
     """
-    Reset scene objects to default and clear the point cloud entirely.
+    Resetea la escena demo y limpia el pointcloud.
     """
-    init_default_scene()
-    mapper.clear()
+    service.reset_scene_and_cloud()
     return {"status": "scene_reset_and_cloud_cleared"}
 
 
@@ -262,83 +236,64 @@ def reset_scene():
 @app.post("/sample", response_model=PointOut)
 def add_sample(sample: SampleIn):
     """
-    Add a single measurement (from real hardware or simulation).
-
-    LaserMapper3D:
-    - Cuantiza X/Z a una celda.
-    - Actualiza el punto representativo de esa celda (promedio).
+    Añade una sola medición (real o simulada).
     """
-    mapper.add_sample(sample.x, sample.y, sample.z, sample.distance)
-    return PointOut(**sample.dict())
+    p = service.add_sample(sample.x, sample.y, sample.z, sample.distance)
+    return PointOut(**p)
 
 
 @app.post("/samples", response_model=PointCloudOut)
 def add_samples(samples: List[SampleIn]):
     """
-    Add multiple measurements at once.
+    Añade varias mediciones a la vez y devuelve el mapa actual.
     """
-    for s in samples:
-        mapper.add_sample(s.x, s.y, s.z, s.distance)
-    return get_pointcloud_json()
+    data = service.add_samples([s.dict() for s in samples])
+    return PointCloudOut(
+        units=data["units"],
+        points=[PointOut(**p) for p in data["points"]],
+    )
 
 
 @app.get("/pointcloud/json", response_model=PointCloudOut)
 def get_pointcloud_json():
     """
-    Return the current point cloud as JSON.
-
-    - Devuelve un punto representativo por celda XZ.
-    - No hay duplicados masivos ni "historial infinito".
+    Devuelve el mapa actual en JSON.
     """
-    data = mapper.to_dict()
+    data = service.get_pointcloud_dict()
     return PointCloudOut(
         units=data["units"],
-        points=[
-            PointOut(
-                x=p["x"],
-                y=p["y"],
-                z=p["z"],
-                distance=p["distance"],
-            )
-            for p in data["points"]
-        ],
+        points=[PointOut(**p) for p in data["points"]],
     )
 
 
 @app.get("/pointcloud/ply")
 def get_pointcloud_ply():
     """
-    Return the current point cloud as ASCII PLY (plain text).
+    Devuelve el mapa actual como PLY ASCII.
     """
-    ply_text = mapper.to_ply()
+    ply_text = service.get_pointcloud_ply()
     return Response(content=ply_text, media_type="text/plain")
 
 
 @app.delete("/pointcloud")
 def clear_pointcloud():
     """
-    Clear the current map completely.
+    Limpia el mapa actual (todas las celdas).
     """
-    mapper.clear()
+    service.clear_pointcloud()
     return {"status": "cleared"}
 
 
 @app.post("/demo/random-cloud", response_model=PointCloudOut)
 def demo_random_cloud(n: int = 1000):
     """
-    Fill the mapper with N random points for demo purposes.
-
-    Como es una demo artificial, aquí sí hacemos clear.
+    Genera una nube aleatoria (no ligadas a la escena física).
     """
-    mapper.clear()
-    for _ in range(n):
-        x = random.uniform(-1.0, 1.0)
-        y = random.uniform(-1.0, 1.0)
-        z = random.uniform(-1.0, 1.0)
-        distance = (x**2 + y**2 + z**2) ** 0.5
-        mapper.add_sample(x, y, z, distance)
-
-    return get_pointcloud_json()
+    data = service.demo_random_cloud(n)
+    return PointCloudOut(
+        units=data["units"],
+        points=[PointOut(**p) for p in data["points"]],
+    )
 
 
 # =========================
@@ -348,37 +303,46 @@ def demo_random_cloud(n: int = 1000):
 @app.get("/pointcloud/segments", response_model=SegmentationResultOut)
 def get_pointcloud_segments():
     """
-    Analyze the current point cloud:
+    Analiza el mapa actual usando pointcloud_analysis.py (versión anterior).
 
-    - Estimate base plane
-    - Classify base vs objects
-    - Cluster objects
+    - Estima plano base.
+    - Clasifica base vs objetos.
+    - Clusteriza objetos.
     """
-    data = mapper.to_dict()
-    units = data["units"]
-    raw_points = data["points"]
+    analysis = service.analyze_pointcloud()
+    units = analysis.get("units", "meters")
+    plane = analysis.get("plane", None)
+    objects = analysis.get("objects", [])
+    points = analysis.get("points", [])
 
-    analysis = analyzer.analyze(raw_points)
-
-    plane = analysis["plane"]
+    plane_out: Optional[PlaneOut]
     if plane is None:
         plane_out = None
     else:
         plane_out = PlaneOut(
-            normal=plane["normal"],
-            d=plane["d"],
+            normal=list(plane["normal"]),
+            d=float(plane["d"]),
         )
 
-    points_out = [SegmentedPointOut(**p) for p in analysis["points"]]
+    points_out = [
+        SegmentedPointOut(
+            x=float(p["x"]),
+            y=float(p["y"]),
+            z=float(p["z"]),
+            distance=float(p["distance"]),
+            label=int(p["label"]),
+        )
+        for p in points
+    ]
 
     objects_out = [
         ObjectInfoOut(
-            label=o["label"],
-            num_points=o["num_points"],
+            label=int(o["label"]),
+            num_points=int(o["num_points"]),
             bbox_min=list(o["bbox_min"]),
             bbox_max=list(o["bbox_max"]),
         )
-        for o in analysis["objects"]
+        for o in objects
     ]
 
     return SegmentationResultOut(
