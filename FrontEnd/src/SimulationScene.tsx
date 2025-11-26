@@ -1,5 +1,5 @@
 // src/SimulationScene.tsx
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls";
 import type { SceneObject } from "./App";
@@ -7,6 +7,8 @@ import type { SceneObject } from "./App";
 interface SimulationSceneProps {
   apiBase: string;
   objects: SceneObject[];
+  onAddBox: () => void;
+  onAddSphere: () => void;
 }
 
 /**
@@ -17,13 +19,33 @@ interface SimulationSceneProps {
  * - Objetos dinámicos desde backend.
  * - Drag & drop de objetos con el mouse (en el plano XZ).
  * - Alt+click en un objeto para eliminarlo.
+ * - Controles UI para velocidad de escaneo y muestreo.
+ * - Botones para añadir figuras (delegan en App.tsx).
  */
 export const SimulationScene: React.FC<SimulationSceneProps> = ({
   apiBase,
   objects,
+  onAddBox,
+  onAddSphere,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
+  // ====== Controles de simulación (UI) ======
+  const [headSpeed, setHeadSpeed] = useState<number>(1); // 1x por defecto
+  const [sampleEvery, setSampleEvery] = useState<number>(1); // muestrear cada N pasos
+
+  const headSpeedRef = useRef(headSpeed);
+  const sampleEveryRef = useRef(sampleEvery);
+
+  useEffect(() => {
+    headSpeedRef.current = headSpeed;
+  }, [headSpeed]);
+
+  useEffect(() => {
+    sampleEveryRef.current = sampleEvery;
+  }, [sampleEvery]);
+
+  // ====== Lógica Three.js ======
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -145,9 +167,7 @@ export const SimulationScene: React.FC<SimulationSceneProps> = ({
     const laserLine = new THREE.Line(laserGeometry, laserMaterial);
     scene.add(laserLine);
 
-    // 👉 Un raycaster para el escaneo del láser
     const scanRaycaster = new THREE.Raycaster();
-    // 👉 Otro raycaster separado para el mouse/picking
     const pointerRaycaster = new THREE.Raycaster();
 
     const downDir = new THREE.Vector3(0, -1, 0);
@@ -182,9 +202,10 @@ export const SimulationScene: React.FC<SimulationSceneProps> = ({
       }
     }
 
-    // === Escaneo raster (igual que antes) ===
-    const scanSizeX = tableSize * 0.8;
-    const scanSizeZ = tableSize * 0.8;
+    // === Escaneo raster ===
+    const tableSizeScan = tableSize;
+    const scanSizeX = tableSizeScan * 0.8;
+    const scanSizeZ = tableSizeScan * 0.8;
     const stepsX = 80;
     const stepsZ = 80;
 
@@ -202,53 +223,67 @@ export const SimulationScene: React.FC<SimulationSceneProps> = ({
     let ix = 0;
     let iz = 0;
     let forward = true;
-    const scanIntervalMs = 40;
+    const baseScanIntervalMs = 40;
+    let sampleCounter = 0;
 
     const scanIntervalId = window.setInterval(() => {
-      const x = xs[ix];
-      const z = zs[iz];
+      const speedFactor = Math.max(0.25, Math.min(4, headSpeedRef.current));
+      const stepsPerTick = Math.max(1, Math.round(speedFactor));
 
-      headMesh.position.set(x, headHeight, z);
-      const origin = headMesh.position.clone();
+      for (let step = 0; step < stepsPerTick; step++) {
+        const x = xs[ix];
+        const z = zs[iz];
 
-      scanRaycaster.set(origin, downDir);
-      scanRaycaster.far = headHeight + 1;
+        headMesh.position.set(x, headHeight, z);
+        const origin = headMesh.position.clone();
 
-      const intersects = scanRaycaster.intersectObjects(raycastTargets, false);
-      if (intersects.length > 0) {
-        const hit = intersects[0].point;
-        updateLaserLine(origin, hit);
-        void sendSample(hit, origin);
-      } else {
-        const end = origin
-          .clone()
-          .add(downDir.clone().multiplyScalar(headHeight));
-        updateLaserLine(origin, end);
-      }
+        scanRaycaster.set(origin, downDir);
+        scanRaycaster.far = headHeight + 1;
 
-      // serpentino
-      if (forward) {
-        ix++;
-        if (ix >= stepsX) {
-          ix = stepsX - 1;
-          iz++;
-          forward = false;
+        const intersects = scanRaycaster.intersectObjects(
+          raycastTargets,
+          false
+        );
+        if (intersects.length > 0) {
+          const hit = intersects[0].point;
+          updateLaserLine(origin, hit);
+
+          sampleCounter++;
+          const every = Math.max(1, sampleEveryRef.current);
+          if (sampleCounter % every === 0) {
+            void sendSample(hit, origin);
+          }
+        } else {
+          const end = origin
+            .clone()
+            .add(downDir.clone().multiplyScalar(headHeight));
+          updateLaserLine(origin, end);
         }
-      } else {
-        ix--;
-        if (ix < 0) {
+
+        // serpentino
+        if (forward) {
+          ix++;
+          if (ix >= stepsX) {
+            ix = stepsX - 1;
+            iz++;
+            forward = false;
+          }
+        } else {
+          ix--;
+          if (ix < 0) {
+            ix = 0;
+            iz++;
+            forward = true;
+          }
+        }
+
+        if (iz >= stepsZ) {
           ix = 0;
-          iz++;
+          iz = 0;
           forward = true;
         }
       }
-
-      if (iz >= stepsZ) {
-        ix = 0;
-        iz = 0;
-        forward = true;
-      }
-    }, scanIntervalMs);
+    }, baseScanIntervalMs);
 
     // === Drag & drop setup ===
     const pointer = new THREE.Vector2();
@@ -268,7 +303,7 @@ export const SimulationScene: React.FC<SimulationSceneProps> = ({
       pointer.y = -(y / rect.height) * 2 + 1;
 
       pointerRaycaster.setFromCamera(pointer, camera);
-      pointerRaycaster.far = 100; // importante: que alcance toda la escena
+      pointerRaycaster.far = 100;
 
       const intersection = new THREE.Vector3();
       if (pointerRaycaster.ray.intersectPlane(dragPlane, intersection)) {
@@ -283,7 +318,7 @@ export const SimulationScene: React.FC<SimulationSceneProps> = ({
           method: "DELETE",
         });
       } catch {
-        // ignore for demo
+        // ignore
       }
     }
 
@@ -306,7 +341,7 @@ export const SimulationScene: React.FC<SimulationSceneProps> = ({
           body: JSON.stringify(payload),
         });
       } catch {
-        // ignore errors in demo
+        // ignore
       }
     }
 
@@ -322,7 +357,6 @@ export const SimulationScene: React.FC<SimulationSceneProps> = ({
       pointerRaycaster.far = 100;
 
       const intersects = pointerRaycaster.intersectObjects(objectMeshes, false);
-
       if (intersects.length === 0) return;
 
       const hit = intersects[0];
@@ -330,11 +364,9 @@ export const SimulationScene: React.FC<SimulationSceneProps> = ({
       const objId = meshToObjectId.get(mesh);
       if (objId == null) return;
 
-      // Solo para confirmar que el click está llegando:
-      console.log("pointerdown hit object id", objId, "alt?", event.altKey);
-
-      // Alt+click para eliminar
       if (event.altKey) {
+        event.preventDefault();
+        event.stopPropagation();
         scene.remove(mesh);
         void deleteObjectById(objId);
         return;
@@ -343,10 +375,15 @@ export const SimulationScene: React.FC<SimulationSceneProps> = ({
       const planeHit = getIntersectionOnPlane(event);
       if (!planeHit) return;
 
+      event.preventDefault();
+      event.stopPropagation();
+
       dragging = true;
       draggedMesh = mesh;
       draggedObjectId = objId;
       dragOriginalY = mesh.position.y;
+
+      controls.enabled = false;
 
       dragOffset.set(
         mesh.position.x - planeHit.x,
@@ -357,6 +394,9 @@ export const SimulationScene: React.FC<SimulationSceneProps> = ({
 
     function onPointerMove(event: PointerEvent) {
       if (!dragging || !draggedMesh) return;
+
+      event.preventDefault();
+
       const planeHit = getIntersectionOnPlane(event);
       if (!planeHit) return;
 
@@ -372,6 +412,7 @@ export const SimulationScene: React.FC<SimulationSceneProps> = ({
         dragging = false;
         draggedMesh = null;
         draggedObjectId = null;
+        controls.enabled = true;
         return;
       }
 
@@ -381,6 +422,7 @@ export const SimulationScene: React.FC<SimulationSceneProps> = ({
       dragging = false;
       draggedMesh = null;
       draggedObjectId = null;
+      controls.enabled = true;
     }
 
     canvas.addEventListener("pointerdown", onPointerDown);
@@ -396,7 +438,6 @@ export const SimulationScene: React.FC<SimulationSceneProps> = ({
     };
     animate();
 
-    // Resize
     function handleResize() {
       if (!canvas) return;
       const width = canvas.clientWidth;
@@ -445,5 +486,67 @@ export const SimulationScene: React.FC<SimulationSceneProps> = ({
     };
   }, [apiBase, objects]);
 
-  return <canvas ref={canvasRef} className="w-full h-full block" />;
+  // ====== UI overlay ======
+  return (
+    <div className="relative w-full h-full">
+      <div className="absolute top-2 left-2 z-10 bg-slate-900/80 border border-slate-700 rounded-xl p-3 text-xs space-y-3 backdrop-blur">
+        <div className="space-y-1">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-medium text-slate-100">Velocidad cabezal</span>
+            <span className="text-slate-300">{headSpeed.toFixed(1)}x</span>
+          </div>
+          <input
+            type="range"
+            min={0.25}
+            max={4}
+            step={0.25}
+            value={headSpeed}
+            onChange={(e) => setHeadSpeed(parseFloat(e.target.value))}
+            className="w-48 accent-emerald-400"
+          />
+        </div>
+
+        <div className="space-y-1">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-medium text-slate-100">Muestrear cada</span>
+            <span className="text-slate-300">
+              {sampleEvery} paso{sampleEvery > 1 ? "s" : ""}
+            </span>
+          </div>
+          <input
+            type="range"
+            min={1}
+            max={10}
+            step={1}
+            value={sampleEvery}
+            onChange={(e) => setSampleEvery(parseInt(e.target.value, 10))}
+            className="w-48 accent-sky-400"
+          />
+        </div>
+
+        <div className="pt-1 flex gap-2">
+          <button
+            type="button"
+            onClick={onAddBox}
+            className="px-2 py-1 rounded-md bg-sky-600 hover:bg-sky-500 text-xs font-semibold text-white shadow-sm"
+          >
+            + Caja
+          </button>
+          <button
+            type="button"
+            onClick={onAddSphere}
+            className="px-2 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white shadow-sm"
+          >
+            + Esfera
+          </button>
+        </div>
+
+        <p className="text-[10px] text-slate-400 pt-1">
+          Consejo: arrastra objetos con el mouse, Alt+click para eliminarlos.
+        </p>
+      </div>
+
+      <canvas ref={canvasRef} className="w-full h-full block" />
+    </div>
+  );
 };

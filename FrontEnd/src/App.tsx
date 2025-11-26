@@ -181,7 +181,13 @@ export default function App() {
             Virtual scene &amp; laser simulation
           </h2>
           <div className="flex-1 rounded-xl bg-slate-950 border border-slate-800 overflow-hidden">
-            <SimulationScene apiBase={API_BASE} objects={sceneObjects} />
+            <SimulationScene
+              apiBase={API_BASE}
+              objects={sceneObjects}
+              onAddBox={handleAddBox}
+              onAddSphere={handleAddSphere}
+            />
+
           </div>
           <p className="mt-2 text-xs text-slate-400">
             Drag &amp; drop objects with the mouse (XZ plane).
