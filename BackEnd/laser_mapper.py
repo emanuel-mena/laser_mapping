@@ -1,106 +1,149 @@
+# laser_mapper.py
+from __future__ import annotations
 from dataclasses import dataclass
-from typing import List, Iterable, Tuple, Dict, Any
+from typing import Dict, Any, List, Tuple
+import time
+import math
 
 
 @dataclass
-class LaserPoint:
+class CellSample:
     """
-    Single 3D laser sample.
-
-    Attributes
-    ----------
-    x, y, z : float
-        3D coordinates of the measured point (in your global coordinate system).
-    distance : float
-        Raw distance returned by the sensor (same units as your hardware).
+    Representa la ÚLTIMA muestra vista en una celda XZ.
+    No se promedia: la última medición manda.
     """
     x: float
     y: float
     z: float
     distance: float
+    timestamp: float
 
 
 class LaserMapper3D:
     """
-    Generic 3D mapper for laser scanning.
+    LaserMapper3D v4 (last-sample-per-cell heightmap)
 
-    This class is fully independent from the specific laser hardware.
-    You only feed it with already-computed 3D coordinates (x, y, z)
-    plus the raw measured distance, and it will store everything and
-    allow exporting in common 3D formats (PLY, OBJ).
+    - El espacio XZ se discretiza en celdas de tamaño `cell_size`.
+    - Para cada celda, guardamos SOLO la última medición que el láser ha visto ahí.
+    - Cuando el entorno cambia y el láser reescanea:
+        * la celda se actualiza al nuevo valor (piso u otro objeto),
+        * desaparecen "objetos fantasma" sin necesidad de limpiar todo.
+    - Memoria O(#celdas), no O(#muestras).
     """
 
-    def __init__(self, units: str = "meters") -> None:
+    def __init__(
+        self,
+        units: str = "meters",
+        cell_size: float = 0.02,
+    ) -> None:
         """
         Parameters
         ----------
         units : str
-            Human-readable units for the coordinate system (e.g. 'meters', 'mm').
-            Only stored as metadata; does not affect calculations.
+            Descripción de unidades (ej: "meters").
+        cell_size : float
+            Tamaño de celda en el plano XZ. Define la resolución espacial.
         """
         self.units = units
-        self._points: List[LaserPoint] = []
+        self.cell_size = cell_size
 
-    # =====================================================
-    # Data insertion
-    # =====================================================
+        # Mapa: (ix, iz) -> CellSample
+        self._cells: Dict[Tuple[int, int], CellSample] = {}
+
+    # -----------------------------
+    # Helpers de grilla
+    # -----------------------------
+
+    def _cell_index(self, x: float, z: float) -> Tuple[int, int]:
+        ix = math.floor(x / self.cell_size)
+        iz = math.floor(z / self.cell_size)
+        return ix, iz
+
+    def clear(self) -> None:
+        """Borra el mapa completo."""
+        self._cells.clear()
+
+    # -----------------------------
+    # API de escritura
+    # -----------------------------
+
     def add_sample(self, x: float, y: float, z: float, distance: float) -> None:
         """
-        Add a single measurement to the map.
+        Registra una muestra en la celda correspondiente.
 
-        Parameters
-        ----------
-        x, y, z : float
-            3D coordinates of the hit point (already computed by your code).
-        distance : float
-            Raw distance reported by the sensor for this measurement.
+        - Cuantizamos (x, z) a una celda (ix, iz).
+        - Guardamos SOLO esta muestra como la última vista en esa celda
+          (sobrescribe cualquier valor anterior).
         """
-        self._points.append(LaserPoint(x, y, z, distance))
+        ix, iz = self._cell_index(x, z)
+        key = (ix, iz)
 
-    def add_samples(self, samples: Iterable[Tuple[float, float, float, float]]) -> None:
-        """
-        Add multiple samples at once.
+        self._cells[key] = CellSample(
+            x=x,
+            y=y,
+            z=z,
+            distance=distance,
+            timestamp=time.time(),
+        )
 
-        Parameters
-        ----------
-        samples : iterable of (x, y, z, distance)
-        """
-        for x, y, z, distance in samples:
-            self.add_sample(x, y, z, distance)
+    # -----------------------------
+    # API de lectura
+    # -----------------------------
 
-    # =====================================================
-    # Accessors
-    # =====================================================
-    def get_points(self) -> List[LaserPoint]:
+    def to_dict(self) -> Dict[str, Any]:
         """
-        Return all samples as a list of LaserPoint objects.
-        """
-        return list(self._points)
+        Devuelve el mapa actual como un dict con un punto por celda.
 
-    def get_xyz_array(self) -> List[Tuple[float, float, float]]:
+        Formato:
+        {
+          "units": "...",
+          "cell_size": ...,
+          "points": [
+            { "x": ..., "y": ..., "z": ..., "distance": ... },
+            ...
+          ]
+        }
         """
-        Return only the (x, y, z) coordinates as a list of tuples.
-        Useful when you only need the point cloud without extra attributes.
-        """
-        return [(p.x, p.y, p.z) for p in self._points]
+        pts: List[Dict[str, float]] = []
+        for cell in self._cells.values():
+            pts.append(
+                {
+                    "x": cell.x,
+                    "y": cell.y,
+                    "z": cell.z,
+                    "distance": cell.distance,
+                }
+            )
 
-    # =====================================================
-    # Export helpers
-    # =====================================================
+        return {
+            "units": self.units,
+            "cell_size": self.cell_size,
+            "points": pts,
+        }
+
     def to_ply(self) -> str:
         """
-        Export the current map as an ASCII PLY point cloud.
+        Exporta el mapa actual como un archivo PLY ASCII.
 
-        - Each point is stored as a vertex.
-        - The 'distance' attribute is stored as a per-vertex scalar property.
+        - Un vértice por celda (última medición).
         """
-        num_vertices = len(self._points)
+        points = [
+            {
+                "x": cell.x,
+                "y": cell.y,
+                "z": cell.z,
+                "distance": cell.distance,
+            }
+            for cell in self._cells.values()
+        ]
+        n = len(points)
 
-        header_lines = [
+        header = [
             "ply",
             "format ascii 1.0",
-            f"comment Generated by LaserMapper3D (units: {self.units})",
-            f"element vertex {num_vertices}",
+            f"comment units={self.units}",
+            f"comment cell_size={self.cell_size}",
+            f"element vertex {n}",
             "property float x",
             "property float y",
             "property float z",
@@ -108,64 +151,8 @@ class LaserMapper3D:
             "end_header",
         ]
 
-        body_lines = [
-            f"{p.x} {p.y} {p.z} {p.distance}"
-            for p in self._points
-        ]
+        lines: List[str] = []
+        for p in points:
+            lines.append(f"{p['x']} {p['y']} {p['z']} {p['distance']}")
 
-        return "\n".join(header_lines + body_lines) + "\n"
-
-    def to_obj(self) -> str:
-        """
-        Export the current map as an OBJ file.
-
-        - Each point is stored as a 'v x y z' vertex.
-        - No faces are generated; this is a point cloud only.
-        - 'distance' is NOT stored (OBJ has no standard scalar per-vertex property).
-        """
-        lines = [
-            f"# Generated by LaserMapper3D (units: {self.units})",
-            "# OBJ point cloud",
-        ]
-
-        for p in self._points:
-            lines.append(f"v {p.x} {p.y} {p.z}")
-
-        return "\n".join(lines) + "\n"
-
-    def save_ply(self, path: str) -> None:
-        """
-        Save the current map as a .ply file on disk.
-        """
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(self.to_ply())
-
-    def save_obj(self, path: str) -> None:
-        """
-        Save the current map as a .obj file on disk.
-        """
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(self.to_obj())
-
-    # =====================================================
-    # Metadata export (optional)
-    # =====================================================
-    def to_dict(self) -> Dict[str, Any]:
-        """
-        Export the whole map as a pure-Python dict (JSON-friendly).
-        Useful if you want to transfer the data over a network.
-        """
-        return {
-            "units": self.units,
-            "points": [
-                {"x": p.x, "y": p.y, "z": p.z, "distance": p.distance}
-                for p in self._points
-            ],
-        }
-
-    # Optional: clear map
-    def clear(self) -> None:
-        """
-        Remove all stored samples.
-        """
-        self._points.clear()
+        return "\n".join(header + lines) + "\n"
