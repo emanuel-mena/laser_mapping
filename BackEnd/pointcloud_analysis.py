@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Dict, Any, Tuple
 import numpy as np
+from sklearn.cluster import DBSCAN
 
 
 @dataclass
@@ -28,7 +29,7 @@ class PointCloudAnalyzer:
 
     - Estimate a dominant plane (the table/base).
     - Classify points: base vs objects on top.
-    - Cluster object points using a simple DBSCAN-like algorithm
+    - Cluster object points using a simple DBSCAN algorithm
       in the XZ plane.
     """
 
@@ -78,23 +79,23 @@ class PointCloudAnalyzer:
 
         xyz = np.array([[p["x"], p["y"], p["z"]] for p in points], dtype=np.float32)
 
-        # 1) Estimar plano base
+        # 1) Estimate base plane
         normal, d = self._fit_base_plane(xyz)
         distances_to_plane = self._point_plane_distance(xyz, normal, d)
 
-        # 2) Clasificar base vs no-base
+        # 2) Classify base vs non-base
         is_base = np.abs(distances_to_plane) < self.base_distance_threshold
         labels = np.zeros(len(points), dtype=np.int32)  # 0 = base; >0 = object id
 
-        # 3) Clustering de puntos que NO son base
+        # 3) Clustering of non-base points
         non_base_idx = np.where(~is_base)[0]
         if len(non_base_idx) > 0:
             object_labels = self._cluster_objects_dbscan(xyz[non_base_idx])
-            # Shift labels a partir de 1
+            # Shift labels starting at 1
             object_labels = object_labels + 1
             labels[non_base_idx] = object_labels
 
-        # 4) Empaquetar resultados
+        # 4) Pack results
         segmented_points: List[SegmentedPoint] = [
             SegmentedPoint(
                 x=float(points[i]["x"]),
@@ -152,73 +153,37 @@ class PointCloudAnalyzer:
         """
         return xyz.dot(normal) + d
 
-    # -------------------- Object clustering (DBSCAN-like) -----------------
+    # -------------------- Object clustering (DBSCAN) ----------------------
 
     def _cluster_objects_dbscan(self, xyz_obj: np.ndarray) -> np.ndarray:
         """
-        Simple DBSCAN-like clustering on XZ plane.
+        Clustering using scikit-learn DBSCAN on the XZ plane.
 
         Returns
         -------
         labels : np.ndarray of shape (N,), int32
-            Cluster label per point (0..K-1). Noise points get label -1.
+            Cluster label per point, in 0..K, where:
+            - 0: "unclassified / noise"
+            - 1..K: cluster ids
         """
         N = xyz_obj.shape[0]
         if N == 0:
             return np.zeros(0, dtype=np.int32)
 
-        # Usamos solo XZ para agrupar por footprint
+        # Use only XZ for footprint clustering
         coords = xyz_obj[:, [0, 2]]
-        eps2 = self.cluster_radius ** 2
 
-        labels = np.full(N, -1, dtype=np.int32)  # -1 = noise/unassigned
-        visited = np.zeros(N, dtype=bool)
-        cluster_id = 0
+        db = DBSCAN(
+            eps=self.cluster_radius,
+            min_samples=self.min_samples,
+            metric="euclidean",
+            n_jobs=-1,  # use all available cores
+        ).fit(coords)
 
-        def region_query(idx: int) -> np.ndarray:
-            """
-            Encuentra vecinos dentro de eps usando distancias cuadradas.
-            """
-            diff = coords - coords[idx]
-            dist2 = np.sum(diff * diff, axis=1)
-            neighbors = np.where(dist2 <= eps2)[0]
-            return neighbors
-
-        for i in range(N):
-            if visited[i]:
-                continue
-
-            visited[i] = True
-            neighbors = region_query(i)
-
-            if neighbors.size < self.min_samples:
-                # Noise (por ahora). Podríamos recolocarlo más tarde si quieres.
-                continue
-
-            # Nuevo cluster
-            labels[i] = cluster_id
-            # Expand cluster
-            seeds = list(neighbors)
-
-            while seeds:
-                j = seeds.pop()
-                if not visited[j]:
-                    visited[j] = True
-                    j_neighbors = region_query(j)
-                    if j_neighbors.size >= self.min_samples:
-                        # Añadir nuevos seeds
-                        for n_idx in j_neighbors:
-                            if n_idx not in seeds:
-                                seeds.append(int(n_idx))
-
-                if labels[j] == -1:
-                    labels[j] = cluster_id
-
-            cluster_id += 1
-
-        # Por comodidad, podemos dejar el ruido en 0 para integrarlo como "no-clasificado"
-        # pero distinto de base: aquí lo mapeamos a 0, y luego el caller lo desplaza +1.
+        labels = db.labels_.astype(np.int32)
+        # scikit-learn uses -1 for noise; map it to 0
         labels[labels < 0] = 0
+
         return labels
 
     # -------------------- Object info (bbox, etc.) ------------------------

@@ -498,7 +498,7 @@ export const SimulationScene: React.FC<SimulationSceneProps> = ({
           <input
             type="range"
             min={0.25}
-            max={4}
+            max={10}
             step={0.25}
             value={headSpeed}
             onChange={(e) => setHeadSpeed(parseFloat(e.target.value))}

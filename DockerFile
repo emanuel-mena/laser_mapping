@@ -1,0 +1,24 @@
+# ---- Build stage ----
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+# Copia sólo los archivos necesarios para instalar dependencias
+COPY vigia/package*.json ./vigia/
+RUN apk add --no-cache git
+
+# Instala dependencias y construye
+RUN npm ci --prefix ./vigia
+COPY vigia ./vigia
+RUN npm run build --prefix ./vigia
+
+# ---- Runtime stage ----
+FROM nginx:alpine AS runner
+
+# Configuración de Nginx (SPA con fallback a index.html)
+COPY vigia/nginx.conf /etc/nginx/conf.d/default.conf
+
+# Copiamos el build generado
+COPY --from=builder /app/vigia/dist /usr/share/nginx/html
+
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
