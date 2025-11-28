@@ -1,7 +1,7 @@
 // src/SimulationScene.tsx
 import React, { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { OrbitControls } from "three/examples/jsm/controls/OrbitControls";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { SceneObject } from "./App";
 
 interface SimulationSceneProps {
@@ -295,7 +295,7 @@ export const SimulationScene: React.FC<SimulationSceneProps> = ({
     let dragOriginalY = 0;
 
     function getIntersectionOnPlane(event: PointerEvent): THREE.Vector3 | null {
-      const rect = canvas.getBoundingClientRect();
+      const rect = canvas!.getBoundingClientRect();;
       const x = event.clientX - rect.left;
       const y = event.clientY - rect.top;
 
@@ -346,7 +346,7 @@ export const SimulationScene: React.FC<SimulationSceneProps> = ({
     }
 
     function onPointerDown(event: PointerEvent) {
-      const rect = canvas.getBoundingClientRect();
+      const rect = canvas!.getBoundingClientRect();
       const x = event.clientX - rect.left;
       const y = event.clientY - rect.top;
 
