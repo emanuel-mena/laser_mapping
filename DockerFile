@@ -2,7 +2,7 @@
 FROM node:20-alpine AS builder
 WORKDIR /app
 
-ENV = ""
+ENV VITE_API_BASE = ""
 
 # Copia sólo los archivos necesarios para instalar dependencias
 COPY FrontEnd/package*.json ./FrontEnd/
