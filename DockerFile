@@ -2,8 +2,6 @@
 FROM node:20-alpine AS builder
 WORKDIR /app
 
-ENV VITEAPIBASE = ""
-
 # Copia sólo los archivos necesarios para instalar dependencias
 COPY FrontEnd/package*.json ./FrontEnd/
 RUN apk add --no-cache git
