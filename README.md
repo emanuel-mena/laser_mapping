@@ -35,10 +35,22 @@ A sample application that pairs a FastAPI backend with a React/Three.js frontend
 3. Open the URL shown in the terminal (e.g., `http://localhost:5173`).
 
 ### Frontend configuration
-Set `VITE_API_BASE` in a `.env` file within `FrontEnd/` to point the UI to your API (defaults to `http://localhost:8000`). Example:
+Set `VITE_API_BASE` in a `.env` file within `FrontEnd/` to point the UI to your API (by default it uses the same origin as the served page). Example for local dev:
 ```env
 VITE_API_BASE=http://localhost:8000
 ```
+
+If no variable is provided, the frontend falls back to the same origin where it is served, which is convenient when the SPA is hosted by FastAPI in production.
+
+## Single-service container (FastAPI + Vite build)
+The root `DockerFile` builds the React app and bundles it alongside the FastAPI backend so it can run as a single service (e.g., on Railway):
+
+```bash
+docker build -t laser-mapping .
+docker run -p 8000:8000 laser-mapping
+```
+
+The image installs the backend dependencies, builds the frontend (outputting directly to `BackEnd/static/`), and serves those files through FastAPI. Railway will inject the `PORT` environment variable automatically, so no extra configuration is required to expose both the API and the static assets from one container.
 
 ## Key API endpoints
 - `GET /scene/objects` – List current scene objects.
