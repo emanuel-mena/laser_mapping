@@ -4,6 +4,9 @@ from enum import Enum
 
 from fastapi import FastAPI, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 from pydantic import BaseModel, Field
 
 from laser_service import (
@@ -41,6 +44,9 @@ service = LaserDemoService(
         with_default_scene=True,
     )
 )
+
+BASE_DIR = Path(__file__).resolve().parent
+FRONTEND_DIST = (BASE_DIR / "static").resolve()
 
 # =========================
 # Pydantic models (solo para API)
@@ -119,8 +125,7 @@ class SegmentationResultOut(BaseModel):
 # Root
 # =========================
 
-@app.get("/")
-def read_root():
+def _api_overview():
     return {
         "message": "LaserMapper3D Demo API (FastAPI adapter)",
         "endpoints": [
@@ -351,3 +356,35 @@ def get_pointcloud_segments():
         objects=objects_out,
         plane=plane_out,
     )
+
+
+@app.get("/api", tags=["meta"])
+def read_root():
+    return _api_overview()
+
+
+if FRONTEND_DIST.exists():
+    frontend_assets = FRONTEND_DIST / "assets"
+    if frontend_assets.exists():
+        app.mount("/assets", StaticFiles(directory=frontend_assets), name="assets")
+
+    @app.get("/", include_in_schema=False)
+    def serve_spa_index():
+        return FileResponse(FRONTEND_DIST / "index.html")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def serve_spa_catch_all(full_path: str):
+        candidate = (FRONTEND_DIST / full_path).resolve()
+        try:
+            candidate.relative_to(FRONTEND_DIST)
+        except ValueError:
+            return FileResponse(FRONTEND_DIST / "index.html")
+
+        if candidate.is_file():
+            return FileResponse(candidate)
+
+        return FileResponse(FRONTEND_DIST / "index.html")
+else:
+    @app.get("/")
+    def serve_api_overview():
+        return _api_overview()
